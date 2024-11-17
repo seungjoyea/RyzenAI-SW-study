@@ -1,76 +1,103 @@
-import torch
-from onnxruntime.quantization.calibrate import CalibrationDataReader
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from torchvision.datasets import CIFAR10
 
+# 필요한 라이브러리 임포트
+import torch    # PyTorch 딥러닝 프레임워크
+from onnxruntime.quantization.calibrate import CalibrationDataReader    # 양자화를 위한 캘리브레이션 도구
+from torch.utils.data import DataLoader, Dataset     # 데이터 로딩 유틸리티
+from torchvision import transforms  # 이미지 변환 도구
+from torchvision.datasets import CIFAR10    # CIFAR-10 데이터셋
 
-import onnx
-import onnxruntime
-from onnxruntime.quantization import CalibrationDataReader, QuantType, QuantFormat, CalibrationMethod, quantize_static
+# ONNX 관련 라이브러리 임포트
+import onnx # ONNX 모델 처리
+import onnxruntime  # ONNX 모델 실행
+from onnxruntime.quantization import (
+    CalibrationDataReader, # 캘리브레이션 데이터 읽기
+    QuantType, # 양자화 타입 정의
+    QuantFormat, # 양자화 포맷 정의
+    CalibrationMethod, # 캘리브레이션 방법
+    quantize_static # 정적 양자화 함수
+)
 
-import vai_q_onnx
+import vai_q_onnx   # AMD/Xilinx AI 양자화 도구
 
 
 class CIFAR10DataSet:
+    """CIFAR-10 데이터셋을 로드하고 전처리하는 클래스"""
     def __init__(
         self,
-        data_dir,
-        **kwargs,
+        data_dir,   # 데이터 디렉토리 경로
+        **kwargs,   # 추가 파라미터
     ):
         super().__init__()
-        self.train_path = data_dir
-        self.vld_path = data_dir
-        self.setup("fit")
+        self.train_path = data_dir  # 학습 데이터 경로
+        self.vld_path = data_dir    # 검증 데이터 경로
+        self.setup("fit")   # 데이터셋 초기 설정
 
     def setup(self, stage: str):
-        transform = transforms.Compose(
-            [transforms.Pad(4), transforms.RandomHorizontalFlip(), transforms.RandomCrop(32), transforms.ToTensor()]
+        """데이터셋 설정 및 전처리 파이프라인 정의"""
+        # 이미지 전처리 변환 정의
+        transform = transforms.Compose([
+            transforms.Pad(4),  # 4픽셀 패딩
+            transforms.RandomHorizontalFlip(),  # 랜덤 수평 뒤집기
+            transforms.RandomCrop(32),  # 32x32 크기로 랜덤 크롭
+            transforms.ToTensor()]  # 텐서로 변환
         )
+        # 학습용과 검증용 데이터셋 생성
         self.train_dataset = CIFAR10(root=self.train_path, train=True, transform=transform, download=False)
         self.val_dataset = CIFAR10(root=self.vld_path, train=True, transform=transform, download=False)
 
 
 class PytorchResNetDataset(Dataset):
+    """PyTorch 데이터셋 형식으로 CIFAR-10 데이터를 변환하는 래퍼 클래스"""
     def __init__(self, dataset):
         self.dataset = dataset
 
     def __len__(self):
+        """데이터셋의 크기 반환"""
         return len(self.dataset)
 
     def __getitem__(self, index):
+        """특정 인덱스의 데이터 샘플 반환"""
         sample = self.dataset[index]
-        input_data = sample[0]
-        label = sample[1]
+        input_data = sample[0]  # 이미지 데이터
+        label = sample[1]   # 레이블
         return input_data, label
 
 
 def create_dataloader(data_dir, batch_size):
+    """데이터로더 생성 함수"""
+    # CIFAR-10 데이터셋 인스턴스 생성
     cifar10_dataset = CIFAR10DataSet(data_dir)
+    # 검증 데이터셋을 49000:1000으로 분할
     _, val_set = torch.utils.data.random_split(cifar10_dataset.val_dataset, [49000, 1000])
+    # 데이터로더 생성 및 반환
     benchmark_dataloader = DataLoader(PytorchResNetDataset(val_set), batch_size=batch_size, drop_last=True)
     return benchmark_dataloader
 
 
 class ResnetCalibrationDataReader(CalibrationDataReader):
+    """ResNet 모델 양자화를 위한 캘리브레이션 데이터 reader"""
     def __init__(self, data_dir: str, batch_size: int = 16):
         super().__init__()
+        # 데이터로더 이터레이터 생성
         self.iterator = iter(create_dataloader(data_dir, batch_size))
 
     def get_next(self) -> dict:
+        """다음 배치의 캘리브레이션 데이터 반환"""
         try:
             images, labels = next(self.iterator)
-            return {"input": images.numpy()}
+            return {"input": images.numpy()}    # numpy 배열로 변환하여 반환
         except Exception:
             return None
 
 
 def resnet_calibration_reader(data_dir, batch_size=16):
+    """캘리브레이션 데이터 리더 생성 함수"""
     return ResnetCalibrationDataReader(data_dir, batch_size=batch_size)
 
 
 
 def main():
+    """메인 함수: 모델 양자화 실행"""
     # `input_model_path` is the path to the original, unquantized ONNX model.
     input_model_path = "models/resnet_trained_for_cifar10.onnx"
 
